@@ -3,14 +3,70 @@
 **Status as of 2026-06-10.** The headless TreeMaker engine now compiles a metric
 tree all the way to a `.fold` crease pattern, and the full **compile → lint**
 pipeline runs end-to-end (Oriedita returns per-vertex Kawasaki/Maekawa errors).
-This was unblocked by fixing a chain of **6 regressions** introduced by git
+This was unblocked by fixing a chain of **7 regressions** introduced by git
 commit `d737e92` ("fix: compiler vs build issues") and siblings, all in
 `treemaker/Source/tmModel/tmTreeClasses/`.
 
-**The one thing still blocking real flat-foldability:** the molecule produces
-some **odd-degree interior vertices**, which are inherently not flat-foldable.
-That is the target for the next session. Everything else (active-path math,
-crease wiring, polygon validity, facet construction, crash/hang safety) is done.
+## UPDATE (this session): the "odd-degree vertex" was a MISDIAGNOSIS — fixed.
+
+The prior handoff blamed **odd-degree interior vertices**. That was wrong. Direct
+measurement (new wrapper diagnostic `debug_vertex_report`) showed the genuine
+INTERIOR vertices were already **even-degree and satisfied Kawasaki exactly**
+(alt-sum = 0 over all incident creases). The degree-5 vertices the prior handoff
+called "interior" are actually **border** vertices (engine `IsBorderVertex()==1`,
+carrying `BORDER`-fold creases), where Kawasaki does not apply.
+
+**The actual root cause (regression #7, now fixed):** `tmPath::MakeVertex` was
+**double-listing every path-owned vertex** in `mOwnedVertices`. The `tmVertex`
+constructor already self-registers with its owner (`tmVertex.cpp:96
+mVertexOwner->mOwnedVertices.push_back(this)`), but a refactor added an *explicit*
+`mOwnedVertices.push_back(theVertex.release())` on top of it. The duplicate then
+flowed into `tmPoly::GetRidgelineVertices` (line 639 asserts, debug-only, that
+ridgeline vertices are never double-listed) and `tmPath::ConnectSelfVertices`,
+which creased **consecutive identical vertices** together → **zero-length
+self-loop creases** (`GetOrMakeCrease(v, v)`; `tmCrease.cpp:92` asserts, debug-
+only, `aVertex1 != aVertex2`). The causal chain to the lint failures:
+
+```
+double push_back  ->  vertex listed 2x in mOwnedVertices
+                  ->  self-loop creases (9 of them on spine-2branch quad)
+                  ->  GetAxialOrGussetCreases() returns a self-loop as a "flank"
+                  ->  CalcBend sees depth2==depth3, mislabels hinge bend
+                  ->  CalcColor parity inverts (facet two-coloring inconsistent)
+                  ->  CalcFold emits FLAT for structural creases (even ridges: RF)
+                  ->  Oriedita drops F edges -> bogus Kawasaki/Maekawa failures
+```
+
+**The fix** (one statement, `tmPath.cpp::MakeVertex`): drop the redundant
+`mOwnedVertices.push_back`; let the constructor register the vertex (matches the
+pristine `ad83e7c` code). Results on `spine-2branch quad`: **31→22 creases**, all
+9 self-loops gone, lint **10→2 violations**, interior vertex `v4` now perfectly
+flat-foldable, all interior vertices satisfy Kawasaki+Maekawa by direct math.
+Side effects: the **classic 4-flap star now BUILDS** (it previously HUNG in
+`CalcLocalFacetOrder`, §5 below — the self-loops were corrupting the corridor
+graph), and **4-flap H-shape (strain) now compiles** (was a 60 s timeout).
+
+## Remaining (NEW, separate issue): scale-only base is not fully converged.
+
+The residual lint violations are **numerical precision, not topology**. The
+4-flap star's center is a textbook flat-foldable vertex (8 creases at 45°), yet
+its measured Kawasaki alt-sum is **−0.0001°**, not 0 — the scale-only ALM
+optimizer converges to ~1e-4°, which exceeds Oriedita's angular tolerance.
+**Proof:** snapping the star's coords to their true grid (`round(x,4)`) makes
+Oriedita return **Pass** (`probe_snap.py`); a hand-built perfect 3M1V vertex also
+Passes (so the face-less FOLD interface is fine and Oriedita is not the problem).
+Non-grid bases (scale 0.717…) can't be snapped to true positions, so they still
+show ~1e-4° residuals. **Next task = drive the base to a true uniaxial optimum**
+(tighter ALM convergence, active-path/angle conditions, or a snap-to-uniaxial
+post-process) so interior-vertex angles are exact. This is the §5 "not at a
+complete uniaxial optimum" item, now isolated as THE remaining blocker.
+
+New wrapper diagnostics (kept; match the `debug_poly_report` pattern):
+`debug_vertex_report()` (per-vertex border/interior, degree, incident crease
+Kind+Fold), `debug_crease_report()` (per-crease facet colors/orders — finds
+FLAT-but-should-fold creases). Probes: `probe_vertex.py`, `probe_kawasaki.py`
+(direct Kawasaki/Maekawa from the FOLD), `probe_crease.py`, `probe_snap.py`
+(demonstrates the convergence-precision residual).
 
 ---
 
@@ -67,6 +123,14 @@ the refactor wave rewrote functions and broke them.
    Fix: `return actLen >= minLen - DistTol();`. *This was THE dominant
    polygon-validity blocker.*
 
+7. **`tmPath.cpp::MakeVertex`** (THIS session) — removed a redundant explicit
+   `mOwnedVertices.push_back(theVertex.release())` that double-listed every
+   path-owned vertex on top of the `tmVertex` constructor's self-registration.
+   The duplicate produced zero-length self-loop creases that corrupted the
+   bend/facet-color/fold pipeline. *This was THE flat-foldability blocker — see
+   the UPDATE block at the top.* `unique_ptr` ownership was the wrong model here:
+   the tree owns all parts via its part hierarchy, not the local scope.
+
 Crash/hang hardening (the original `TMASSERT`/`TMFAIL` guards are compiled out
 under `NDEBUG`; **routines reached via `tmTreeCleaner`'s destructor must
 `return`, never `throw`** — throwing from a destructor calls `std::terminate`):
@@ -121,7 +185,14 @@ by `tmPoly` itself.
 
 ---
 
-## 4. THE NEXT TASK: odd-degree interior vertices
+## 4. [SUPERSEDED — see the UPDATE block at the top] odd-degree interior vertices
+
+> **This section's diagnosis was WRONG and is kept only for history.** The
+> degree-5 vertices below are *border* vertices (Kawasaki-exempt), not interior;
+> the genuine interior vertices were already even-degree and Kawasaki-satisfying.
+> The real defect was the `tmPath::MakeVertex` double-`push_back` (regression #7),
+> now fixed. The actual remaining blocker is **scale-only convergence precision**
+> (UPDATE block). Do not chase "odd-degree interior vertices."
 
 **Symptom.** `spine-2branch quad` compiles, but Oriedita reports ~10 vertex
 violations (7 Kawasaki / 3 Maekawa). Direct angle measurement of the FOLD:

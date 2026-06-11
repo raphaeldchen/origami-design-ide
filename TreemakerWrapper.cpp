@@ -307,6 +307,108 @@ public:
     return ss.str();
   }
 
+  // TEMP DIAGNOSTIC: build the full crease pattern, then dump EVERY vertex with
+  // its FOLD index, location, tree-node projection, border flag, incident-crease
+  // count, and the Kind+Fold of each incident crease. The point is to locate the
+  // odd-degree INTERIOR vertices (degree must be even for flat-foldability) and
+  // see exactly which crease type (axial/gusset/ridge/hinge/pseudohinge) is
+  // missing there. Kind letters: A=axial G=gusset R=ridge h=unfolded-hinge
+  // H=folded-hinge P=pseudohinge. Fold letters: M/V/F/B (see FoldToAssignment).
+  // (Temp; safe to remove once the molecule layer is solid.)
+  std::string debug_vertex_report() {
+    mTree->BuildTreePolys();
+    if (!mTree->IsPolygonValid())
+      return "polygon network not valid; cannot build crease pattern\n";
+    mTree->BuildPolysAndCreasePattern();
+
+    static const char* kindLetter[] = {"A", "G", "R", "h", "H", "P"};
+
+    const tmDpptrArray<tmVertex>& verts = mTree->GetVertices();
+    // Mirror ExportFold's index assignment so labels match the linted FOLD.
+    std::map<const tmVertex*, std::size_t> vIndex;
+    for (std::size_t i = 0; i < verts.size(); ++i) vIndex[verts[i]] = i;
+
+    std::ostringstream ss;
+    ss << std::fixed << std::setprecision(5);
+    ss << "HasFullCP=" << (mTree->HasFullCP() ? 1 : 0)
+       << " nVerts=" << verts.size()
+       << " nCreases=" << mTree->GetCreases().size() << "\n";
+    for (std::size_t i = 0; i < verts.size(); ++i) {
+      const tmVertex* v = verts[i];
+      const tmDpptrArray<tmCrease>& vc = v->GetCreases();
+      bool border = v->IsBorderVertex();
+      tmNode* tn = v->GetTreeNode();
+      ss << "v" << i
+         << (border ? " [border]" : " [INTERIOR]")
+         << " loc=(" << v->GetLoc().x << "," << v->GetLoc().y << ")"
+         << " node=" << (tn ? int(tn->GetIndex()) : -1)
+         << " deg=" << vc.size();
+      if (!border && (vc.size() % 2 != 0)) ss << " <<< ODD-DEGREE";
+      ss << "  creases:";
+      for (std::size_t j = 0; j < vc.size(); ++j) {
+        const tmCrease* c = vc[j];
+        int k = int(c->GetKind());
+        const char* kl = (k >= 0 && k <= 5) ? kindLetter[k] : "?";
+        ss << " " << kl << FoldToAssignment(c->GetFold());
+      }
+      ss << "\n";
+    }
+    return ss.str();
+  }
+
+  // TEMP DIAGNOSTIC: dump every crease with its kind, fold, and the color+order
+  // of its two incident facets. A crease comes out FLAT iff its two facets share
+  // a color; this report locates the facet-coloring inconsistency that turns
+  // structural creases (e.g. ridges) flat. Color: U=up(color) W=white-up
+  // N=not-oriented. (Temp; safe to remove once the molecule layer is solid.)
+  std::string debug_crease_report() {
+    mTree->BuildTreePolys();
+    if (!mTree->IsPolygonValid())
+      return "polygon network not valid; cannot build crease pattern\n";
+    mTree->BuildPolysAndCreasePattern();
+
+    static const char* kindLetter[] = {"AXIAL", "GUSSET", "RIDGE",
+                                        "uHINGE", "fHINGE", "PSEUDO"};
+    auto colLetter = [](const tmFacet* f) -> char {
+      if (!f) return '-';
+      switch (f->GetColor()) {
+        case tmFacet::COLOR_UP:    return 'U';
+        case tmFacet::WHITE_UP:    return 'W';
+        default:                   return 'N';
+      }
+    };
+    const tmDpptrArray<tmVertex>& verts = mTree->GetVertices();
+    std::map<const tmVertex*, std::size_t> vIndex;
+    for (std::size_t i = 0; i < verts.size(); ++i) vIndex[verts[i]] = i;
+
+    const tmDpptrArray<tmCrease>& creases = mTree->GetCreases();
+    std::ostringstream ss;
+    ss << "nCreases=" << creases.size()
+       << " nFacets=" << mTree->GetFacets().size() << "\n";
+    for (std::size_t i = 0; i < creases.size(); ++i) {
+      const tmCrease* c = creases[i];
+      const tmDpptrArray<tmVertex>& cv = c->GetVertices();
+      int a = (cv.size() >= 1 && vIndex.count(cv[0])) ? int(vIndex[cv[0]]) : -1;
+      int b = (cv.size() >= 2 && vIndex.count(cv[1])) ? int(vIndex[cv[1]]) : -1;
+      const tmFacet* ff = c->GetFwdFacet();
+      const tmFacet* bf = c->GetBkdFacet();
+      int k = int(c->GetKind());
+      ss << "c" << i << " " << ((k >= 0 && k <= 5) ? kindLetter[k] : "?")
+         << " fold=" << FoldToAssignment(c->GetFold())
+         << " v" << a << "-v" << b
+         << "  fwd[col=" << colLetter(ff)
+         << ",ord=" << (ff ? int(ff->GetOrder()) : -1)
+         << ",src=" << (ff && ff->IsSourceFacet() ? 1 : 0) << "]"
+         << "  bkd[col=" << colLetter(bf)
+         << ",ord=" << (bf ? int(bf->GetOrder()) : -1)
+         << ",src=" << (bf && bf->IsSourceFacet() ? 1 : 0) << "]";
+      if (ff && bf && ff->GetColor() == bf->GetColor() && c->GetKind() != tmCrease::UNFOLDED_HINGE)
+        ss << "  <<< SAME-COLOR (should fold!)";
+      ss << "\n";
+    }
+    return ss.str();
+  }
+
   /*
    * Run the ALM strain optimizer over all nodes/edges (conditions such as
    * EDGE_LENGTH_FIXED and NODES_SYMMETRIC constrain the result), then build the
@@ -529,6 +631,10 @@ PYBIND11_MODULE(headless_treemaker, m) {
            &HeadlessTreemaker::build_and_export)
       .def("debug_poly_report",
            &HeadlessTreemaker::debug_poly_report)
+      .def("debug_vertex_report",
+           &HeadlessTreemaker::debug_vertex_report)
+      .def("debug_crease_report",
+           &HeadlessTreemaker::debug_crease_report)
       .def("run_strain_optimization_and_export",
            &HeadlessTreemaker::run_strain_optimization_and_export)
       .def("load_and_export_tmd", &HeadlessTreemaker::load_and_export_tmd,
