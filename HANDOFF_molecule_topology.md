@@ -1,5 +1,35 @@
 # Handoff: TreeMaker Molecule-Construction Layer
 
+## UPDATE 2026-06-11 — PRECISION SOLVED; FIRST E2E PASSES; quad v9 parked.
+
+**Milestone:** tightened the ALM convergence tolerances `TOL_FEAS`, `TOL_F`
+(`tmNLCO_alm.cpp::Minimize`) and `TOL_G` (`MinimizeAugLag` inner BFGS), all
+`1.0e-5 → 1.0e-8`. **The 4-flap star AND 4-flap H-shape now PASS Oriedita
+end-to-end** (compile→FOLD→lint Pass) — the first clean happy-path successes.
+Verify with `.venv/bin/python mcp_harness/probe_verify.py`. KEEP this change.
+Rebuild from inside mcp_harness (`PYTHON=.venv/bin/python ./build.sh`).
+
+- Measured Oriedita's Kawasaki tolerance ≈ **1e-6°** (`probe_tol.py`): 2e-7°
+  passes, 2e-6° fails — NOT machine-zero, so ~100× tightening was the right lever.
+  Exported residual went 9.6e-5° → ~1e-7° on the star.
+- DEAD END (reverted): also raising `WEIGHT_MAX 1e8→1e10` fixed quad-v5 precision
+  but BROKE the star (flipped a hinge to FLAT) and broke quad-strain convergence.
+  Left at 1e8. WEIGHT_MAX is too blunt a knob.
+- PARKED (deep frontier, NOT precision, NOT a simple mislabel — that hypothesis
+  was falsified): the **spine-2branch quad still fails at vertex v9**. v9's two
+  hinge creases are *legitimate* UNFOLDED_HINGEs (the passing H-shape has unfolded
+  hinges too, at v7). Differentiator: after dropping unfolded hinges, H-shape v7 =
+  1M3V (deg-4, flat-foldable) but quad **v9 = only 2 collinear valleys** (deg-2) —
+  both of v9's hinges came out unfolded, so Oriedita rejects it. A valid flat-fold
+  M/V *exists* (reassigning the hinges → Pass, `probe_reassign.py`), so the
+  geometry is fine; the facet two-coloring just left both v9 hinges unfolded.
+  Dropping F edges does NOT help (`probe_fdrop.py`). Real fix is in the
+  facet-order/CalcColor layer (why both v9 hinges unfold on asymmetric bases) or
+  an export-side collinear-crease merge. Probes: `probe_creasekind.py`,
+  `probe_hshape_creases.py`, `probe_v5v9.py`, `probe_verify.py`.
+
+---
+
 **Status as of 2026-06-10.** The headless TreeMaker engine now compiles a metric
 tree all the way to a `.fold` crease pattern, and the full **compile → lint**
 pipeline runs end-to-end (Oriedita returns per-vertex Kawasaki/Maekawa errors).
