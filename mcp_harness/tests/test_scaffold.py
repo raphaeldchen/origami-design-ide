@@ -7,7 +7,7 @@ import runner
 
 def test_catalog_nonempty_and_unique():
     names = [name for name, _ in cases.CASES]
-    assert len(names) >= 16
+    assert len(names) >= 16  # catalog currently has 18; guard against accidental truncation
     assert len(names) == len(set(names)), "duplicate case names"
     for name in cases.GOLDEN_CASE_NAMES:
         assert name in cases.CASES_BY_NAME, f"golden case {name} missing from catalog"

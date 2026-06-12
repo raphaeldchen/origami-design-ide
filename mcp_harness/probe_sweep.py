@@ -6,42 +6,11 @@ engine's behavior envelope and seeds the future Tier-2.5 heuristic checker.
 Run: .venv/bin/python probe_sweep.py
 """
 from __future__ import annotations
-import json, multiprocessing as mp
-import linter_server
-
-
-def _worker(q, nodes_json, pairs):
-    try:
-        import headless_treemaker as ht
-        e = ht.HeadlessTreemaker(); e.init_paper(1.0, 1.0)
-        e.build_tree_from_json(nodes_json)
-        for a, b in pairs:
-            e.apply_symmetry(int(a), int(b))
-        e.run_scale_optimization()
-        q.put(("ok", e.build_and_export()))
-    except BaseException as exc:  # noqa
-        q.put(("err", repr(exc)[:90]))
-
-
-def run(nodes, pairs, timeout=40):
-    ctx = mp.get_context("spawn"); q = ctx.Queue()
-    p = ctx.Process(target=_worker, args=(q, json.dumps(nodes), pairs))
-    p.start(); p.join(timeout)
-    if p.is_alive():
-        p.terminate(); p.join(); return ("HANG", "")
-    if q.empty():
-        return ("CRASH", f"exit {p.exitcode}")
-    return q.get()
-
-
-def lint(fold):
-    return linter_server.validate_flat_foldability(fold).splitlines()[0]
-
-
-# ---- catalog of trees --------------------------------------------------------
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "tests"))
+import json
 from cases import CASES  # canonical catalog (shared with the regression suite)
+from runner import compile_tree as run, lint  # shared spawn-isolation + lint
 
 
 def main():

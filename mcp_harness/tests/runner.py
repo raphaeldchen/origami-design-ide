@@ -9,6 +9,7 @@ sys.path). Run via:  PYTHONPATH=.:tests python -m pytest tests/   from mcp_harne
 from __future__ import annotations
 import json
 import multiprocessing as mp
+import queue as _queue
 
 # Geometry keys we compare; metadata (file_*/frame_*) is intentionally ignored.
 GEOM_KEYS = ("vertices_coords", "edges_vertices", "edges_assignment")
@@ -34,9 +35,10 @@ def compile_tree(nodes, pairs, timeout=40):
     p.start(); p.join(timeout)
     if p.is_alive():
         p.terminate(); p.join(); return ("HANG", "")
-    if q.empty():
+    try:
+        return q.get(timeout=5)
+    except _queue.Empty:
         return ("CRASH", f"exit {p.exitcode}")
-    return q.get()
 
 
 def lint(fold_json_str):
