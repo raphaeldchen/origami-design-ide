@@ -27,6 +27,8 @@ def test_geometry_matches_golden(name):
     st, payload = runner.compile_tree(nodes, pairs)
     assert st == "ok", f"{name} did not compile: {st} {payload}"
     actual = runner.fold_geom(json.loads(payload))
+    missing = [k for k in runner.GEOM_KEYS if k not in actual]
+    assert not missing, f"{name}: engine output missing geometry keys {missing}"
     golden = _load_golden(name)
 
     # Exact topology + mountain/valley.
