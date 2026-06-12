@@ -1,5 +1,60 @@
 # Handoff: TreeMaker Molecule-Construction Layer
 
+## UPDATE 2026-06-11 (session 4) — CATERPILLAR SIGSEGV FIXED (regression #8). Broad sweep: 0 crashes / 0 hangs.
+
+**Headline (objective A) DONE — and it Passes, not just compiles.** The 5-leaf
+caterpillar SIGSEGV (`exit -11`) is fixed. It now compiles to a 23-vertex / 38-edge
+FOLD and **Passes Oriedita end-to-end** (`probe_lint.py`, `probe_sweep.py`).
+
+**Root cause = regression #8, a classic off-by-one in the `tmArray.h` rewrite.**
+`tmArray<T>::MoveItem(from, to)` is **1-based** (its `RemoveItemAt`/`InsertItemAt`
+do `begin()+n-1`), but the rewrite grabbed the moved element with the 0-based
+`operator[]` *without* the `- 1`: `T t = (*this)[inFromIndex];` instead of
+pristine's `(*this)[inFromIndex - 1]`. `tmPath::MakeVertex`'s insertion-sort calls
+`mOwnedVertices.MoveItem(mOwnedVertices.size(), i+1)`, so the grab read
+`(*this)[size()]` — one past the end — getting garbage/NULL, which `InsertItemAt`
+then planted into `mOwnedVertices` while `RemoveItemAt(size())` dropped the real
+new vertex. The planted **NULL** later SIGSEGV'd in `tmPath::GetOrMakeVertex`
+(`tmPath.cpp:320`, deref `testVertex->mLoc` at addr `0x38` = NULL+offsetof(mLoc)),
+called from `tmPoly::BuildPolyContents:1037`. Only topologies whose molecule
+builder reorders path-owned vertices (a path with ≥2 interior branch-nodes, e.g.
+the caterpillar's length-3 spine) hit the `MoveItem` branch — which is why
+star/H/quad never tripped it. `TMASSERT(n < size())` in `operator[]` compiles out
+under NDEBUG, so the OOB read was silent in all builds; the `-O0 -g` lldb backtrace
+was essential to localize it.
+
+**Fix (`Source/tmModel/tmPtrClasses/tmArray.h`, restores pristine `ad83e7c`):**
+`MoveItem` now grabs `(*this)[inFromIndex - 1]`. Also restored the **same dropped
+`- 1` in both `NthItem` overloads** (`return (*this)[n - 1]`) — a latent OOB read
+of the identical class, used by `tmDpptrArray::ReplaceItemAt` (currently no live
+caller, but it contradicted its own "1-based index" doc). No other engine change.
+
+**Objective B (CalcLocalFacetOrder infinite-loop) did NOT reproduce.** The larger
+stars the prior handoff said *hung* (star-5/6/8) now compile cleanly in the sweep
+(they only FAIL-LINT on the known v5-class precision frontier). No bounded-iteration
+guard was added — there is no current reproducer, and adding one speculatively
+would violate the reproduce-first discipline. Re-open only if a real hang resurfaces.
+
+**Objective C — broad robustness sweep (`probe_sweep.py`, NEW).** 16 trees varying
+node count / depth / edge weights / symmetry. Result: **0 CRASH, 0 HANG**; every
+failure is a clean Python `RuntimeError` or a lint verdict. Tally: 9 PASS,
+5 FAIL-LINT (precision/topology = the existing v5/molecule frontier: star-5/6/8,
+cat-spine4, star-6-sym), 2 CLEAN-ERR (`cat-spine5` "could not build a full crease
+pattern"; `deep-chain` "polygon network is not valid" — legitimate un-packable
+trees, surfaced cleanly). This PASS/FAIL-LINT/CLEAN-ERR catalog is also the seed
+dataset for the CLAUDE.md §6 Tier-2.5 heuristic checker.
+
+**Regression:** `probe_verify.py` still shows star/H/quad all **Pass** (re-run after
+the optimized rebuild). New artifacts: `probe_sweep.py`, `repro_cat.py` (minimal
+single-process caterpillar repro for lldb). Build the optimized `.so` with
+`PYTHON=.venv/bin/python ./build.sh` from inside `mcp_harness`.
+
+Still open (unchanged, the deep frontier — NOT robustness): the FAIL-LINT bases are
+the v5-class precision / facet-two-coloring topology issue; the strain path still
+perturbs the optimum (non-default); caterpillar/quad strain non-converge (reason 1).
+
+---
+
 ## UPDATE 2026-06-11 (session 3) — v5 SOLVED: active-path projection lands. ALL THREE canonical bases now PASS.
 
 **Milestone: the quad (and non-grid bases generally) is now fully flat-foldable.**
