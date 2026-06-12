@@ -75,11 +75,14 @@ spawn+timeout isolation pattern from `probe_sweep.py`.
 - **`cases.py`** — the canonical tree catalog (star, caterpillar, symmetric,
   uneven, deep-chain, two-level, plus the H-shape and quad known-good cases).
   Single source of truth; `probe_sweep.py` is refactored to import it.
-- **`conftest.py`** — fixtures/helpers:
+- **`runner.py`** — importable helpers (an importable module rather than a
+  `conftest.py`, so `bless.py` and `probe_sweep.py` can import the same logic):
   - `compile_tree(nodes, pairs, timeout)` → runs a compile in a spawned
     subprocess with a timeout, returning `("ok", fold) | ("err", msg) |
     ("CRASH", info) | ("HANG", "")`. Lifted from `probe_sweep.run`/`_worker`.
   - `lint(fold)` → first line of `linter_server.validate_flat_foldability`.
+  - `verdict_for(...)` and `fold_geom(...)`; `GEOM_KEYS` is the single source of
+    which keys are compared and stored in goldens.
 - **`test_verdicts.py`** — parametrized over every case. Computes the current
   verdict (`PASS`/`FAIL-LINT`/`CLEAN-ERR`/`CRASH`/`HANG`) and asserts it equals
   the value in `baseline_verdicts.json`. `CRASH`/`HANG` always fail regardless of
@@ -96,8 +99,10 @@ spawn+timeout isolation pattern from `probe_sweep.py`.
     ignores. Confirmed keys: `vertices_coords`, `edges_vertices`,
     `edges_assignment`, `file_classes`, `file_creator`, `file_spec`,
     `frame_attributes`, `frame_classes`, `frame_title`.
-- **`test_determinism.py`** — compile the same tree twice; assert byte-identical
-  FOLD. (Generalizes `probe_determinism.py`.)
+- **`test_determinism.py`** — compile the same tree twice; assert identical
+  geometry (the `runner.GEOM_KEYS` subset; volatile `file_*`/`frame_*` metadata
+  is excluded so it can't masquerade as nondeterminism). (Generalizes
+  `probe_determinism.py`.)
 
 **Blessing workflow:** `make bless` regenerates `baseline_verdicts.json` and the
 `goldens/*.fold` from current engine output. Run deliberately when the engine
