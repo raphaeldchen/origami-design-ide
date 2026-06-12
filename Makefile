@@ -23,7 +23,7 @@ sweep: build ## Run the broad probe_sweep catalog (exploratory, non-gating)
 	cd $(HARNESS) && $(PYTHON) probe_sweep.py
 
 clean: ## Remove build artifacts
-	rm -rf $(HARNESS)/headless_treemaker*.so $(HARNESS)/*.dSYM \\
-	       $(HARNESS)/OrieditaValidator.class \\
-	       $(HARNESS)/__pycache__ $(HARNESS)/tests/__pycache__ \\
+	rm -rf $(HARNESS)/headless_treemaker*.so $(HARNESS)/*.dSYM \
+	       $(HARNESS)/OrieditaValidator.class \
+	       $(HARNESS)/__pycache__ $(HARNESS)/tests/__pycache__ \
 	       $(HARNESS)/.pytest_cache
