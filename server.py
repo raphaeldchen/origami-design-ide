@@ -73,7 +73,15 @@ _SESSION: dict = {
 # negative exitcode, which the parent translates into a clean error string.    #
 # --------------------------------------------------------------------------- #
 def _worker_full_base(queue, tree_nodes_json, pairs, paper_width, paper_height):
-    """Build -> constrain -> scale-opt -> strain-opt -> export, from scratch."""
+    """Build -> constrain -> scale-opt -> export (GUI-style), from scratch.
+
+    Uses build_and_export (scale-only) rather than the strain path: strain
+    optimization perturbs the uniaxial optimum, so even clean bases (4-flap star,
+    H-shape) come out NOT flat-foldable on the strain path, whereas the scale-only
+    path passes Oriedita. This mirrors probe_verify.py and the TreeMaker GUI's
+    Action -> Build Crease Pattern (which runs no strain). The v5 active-path
+    projection that makes non-grid bases exact lives inside build_and_export.
+    """
     try:
         import headless_treemaker as ht_child
 
@@ -83,7 +91,7 @@ def _worker_full_base(queue, tree_nodes_json, pairs, paper_width, paper_height):
         for pair in pairs:
             engine.apply_symmetry(int(pair[0]), int(pair[1]))
         engine.run_scale_optimization()
-        queue.put(("ok", engine.run_strain_optimization_and_export()))
+        queue.put(("ok", engine.build_and_export()))
     except Exception as exc:  # clean C++/Python errors
         queue.put(("err", str(exc)))
 
@@ -106,7 +114,9 @@ def _worker_compile_recipe(queue, recipe):
         for edge_id in recipe["fixed_edges"]:
             engine.set_edge_strain_fixed(int(edge_id))
         engine.run_scale_optimization()
-        queue.put(("ok", engine.run_strain_optimization_and_export()))
+        # Scale-only export (see _worker_full_base): the strain path perturbs the
+        # uniaxial optimum and breaks flat-foldability even for clean bases.
+        queue.put(("ok", engine.build_and_export()))
     except Exception as exc:
         queue.put(("err", str(exc)))
 

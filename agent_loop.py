@@ -89,9 +89,9 @@ The backend exposes two distinct workflows. Symmetry enters each differently, \
 and mixing them silently discards your symmetry constraints:
   (A) One-shot: draft_and_compile_full_base(tree_nodes, symmetric_pairs, ...). \
 Pass the left/right leaf pairs directly as `symmetric_pairs`. This one call \
-builds the tree, applies symmetry, optimizes (scale then strain), builds the \
-Universal Molecule, and returns FOLD JSON. Do NOT call new_base / apply_symmetry \
-on this path -- they are not read by it.
+builds the tree, applies symmetry, runs scale optimization, builds the Universal \
+Molecule (GUI-style, scale-only), and returns FOLD JSON. Do NOT call new_base / \
+apply_symmetry on this path -- they are not read by it.
   (B) Incremental: new_base(tree_nodes) -> apply_symmetry(a, b) for each \
 left/right pair -> optionally set_edge_strain_fixed(edge) -> compile_base(). \
 Here apply_symmetry mutates the live session and compile_base reads it. The \
