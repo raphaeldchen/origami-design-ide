@@ -34,60 +34,14 @@ def run(nodes, pairs, timeout=40):
     return q.get()
 
 
-def N(i, par, ln):
-    return {"id": i, "parent_id": par, "length": ln}
-
-
 def lint(fold):
     return linter_server.validate_flat_foldability(fold).splitlines()[0]
 
 
 # ---- catalog of trees --------------------------------------------------------
-def star(k, ln=1.0):
-    return [N(0, None, 0)] + [N(i, 0, ln) for i in range(1, k + 1)], []
-
-
-def caterpillar(spine, leaf_len=0.5, spine_len=0.25):
-    """spine nodes 1..spine off a chain from root 0, a leaf hanging off each
-    spine node (incl root)."""
-    nodes = [N(0, None, 0)]
-    for i in range(1, spine + 1):
-        nodes.append(N(i, i - 1, spine_len))
-    nxt = spine + 1
-    for s in range(0, spine + 1):
-        nodes.append(N(nxt, s, leaf_len)); nxt += 1
-    return nodes, []
-
-
-def symmetric_pairs_star(k, ln=1.0):
-    nodes, _ = star(k, ln)
-    pairs = [[i, i + 1] for i in range(1, k, 2)]
-    return nodes, pairs
-
-
-CASES = [
-    ("star-3",            star(3)),
-    ("star-4",            star(4)),
-    ("star-5",            star(5)),
-    ("star-6",            star(6)),
-    ("star-8",            star(8)),
-    ("star-4-sym",        symmetric_pairs_star(4)),
-    ("star-6-sym",        symmetric_pairs_star(6)),
-    ("cat-spine2",        caterpillar(2)),
-    ("cat-spine3",        caterpillar(3)),   # the original 5-leaf caterpillar shape
-    ("cat-spine4",        caterpillar(4)),
-    ("cat-spine5",        caterpillar(5)),
-    ("cat-long-legs",     caterpillar(3, leaf_len=0.8, spine_len=0.15)),
-    ("cat-short-legs",    caterpillar(3, leaf_len=0.3, spine_len=0.3)),
-    ("uneven-star",       ([N(0, None, 0), N(1, 0, 1.0), N(2, 0, 0.6),
-                            N(3, 0, 0.4), N(4, 0, 0.8)], [])),
-    ("deep-chain",        ([N(0, None, 0), N(1, 0, 0.3), N(2, 1, 0.3),
-                            N(3, 2, 0.3), N(4, 3, 0.3), N(5, 4, 0.5),
-                            N(6, 0, 0.5)], [])),
-    ("two-level-tree",    ([N(0, None, 0), N(1, 0, 0.3), N(2, 0, 0.3),
-                            N(3, 1, 0.5), N(4, 1, 0.5), N(5, 2, 0.5),
-                            N(6, 2, 0.5)], [])),
-]
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "tests"))
+from cases import CASES  # canonical catalog (shared with the regression suite)
 
 
 def main():
