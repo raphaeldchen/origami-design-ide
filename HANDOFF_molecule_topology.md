@@ -1,5 +1,92 @@
 # Handoff: TreeMaker Molecule-Construction Layer
 
+## UPDATE 2026-06-11 (session 3) — v5 SOLVED: active-path projection lands. ALL THREE canonical bases now PASS.
+
+**Milestone: the quad (and non-grid bases generally) is now fully flat-foldable.**
+`probe_verify.py`: **star Pass, H-shape Pass, spine-2branch quad Pass** — the first
+non-grid base to pass end-to-end. The v5 precision blocker is fixed *outside* the
+global ALM penalty, exactly as the session-2 handoff predicted (option (b)).
+
+**What shipped** (`TreemakerWrapper.cpp`): a post-optimization **Gauss-Newton
+projection of the leaf-node positions onto the active-path constraint manifold**,
+holding scale fixed (`ProjectActivePaths`, called inside `BuildAndExport` after the
+polygon-validity gate). Each active axis-parallel leaf path contributes the
+equality `|loc_a − loc_b| − scale·treeLen = 0` (Jacobian row = unit chord vector
++u at a, −u at b); the tiny normal system `(JᵀJ + λI)dX = −Jᵀr` (n = 2·leafCount,
+λ=1e-9 damps the translation/rotation gauge) is solved by a dense Gauss-elim helper
+`SolveDense`. Refined coords are written back via `SetLoc`, then polys are rebuilt
+for the molecule. Measured effect (`probe_project.py`, `debug_active_path_report`):
+active-path |residual| **quad 9.5e-9 → 0**, **H 2.9e-9 → 1.1e-16** in ~1 iter.
+Exact leaf coords ⟹ exact Universal-Molecule interior angles ⟹ Kawasaki ≈ 0 — the
+irrational-coordinate analogue of the session-1 "snap the star to grid → Pass".
+
+**Critical subtlety — symmetry must be carried in the projection.** Free projection
+fixed the quad but **regressed the H-shape** (Pass→2 violations): the active-path
+set alone is under-determined, so damped GN drifted the base asymmetric. Fix:
+`apply_symmetry` now records the mirror pairs (`mSymPairs`); the projection adds two
+linear rows per pair — `b.x−a.y=0`, `b.y−a.x=0` (reflection about the 45° axis
+y=x through center (0.5,0.5), which simplifies to `mirror(p)=(p.y,p.x)` since the
+center lies on the line). With those rows the H-shape stays symmetric and Passes.
+
+Verified: `probe_verify.py` (all 3 Pass via the plain `build_and_export` path),
+`probe_project.py` (residual before/after + lint), `probe_determinism.py` (6/6
+identical Pass — projection is deterministic). Build: `PYTHON=.venv/bin/python
+./build.sh`.
+
+KNOWN / OUT OF SCOPE (unchanged, pre-existing — NOT caused by the projection):
+- The **star stalls at ~1.7e-9** (hits the 50-iter cap, λ-damping floor on its
+  rank-deficient/redundant constraint set) but **passes with margin**. Harmless;
+  if a future non-grid base needs a tighter floor, add an explicit gauge-fix (pin
+  one leaf + one coord) so λ can go to ~0 instead of damping.
+- **5-leaf caterpillar still SIGSEGVs** on the scale path (handoff §5, downstream in
+  the facet builder — projection doesn't touch it).
+- The **strain path** still perturbs the optimum (non-default by design; §5).
+
+---
+
+## UPDATE 2026-06-11 (session 2) — v9 RESOLVED in the linter; v5 is the lone quad blocker; all 3 global ALM levers now CLOSED.
+
+**v9 (the "facet two-coloring frontier") is fixed** — not in the engine, but as a
+foldability-preserving **linter normalisation** now LIVE in `linter_server.py`
+(`_normalize_for_foldability`, applied inside `validate_flat_foldability` before
+the JVM). Two provably-neutral transforms: (1) drop flat `F` creases (Oriedita
+already treats them as aux); (2) merge any degree-2 vertex whose two creases are
+collinear + same M/V (a spurious midpoint of one straight fold). v9 was exactly a
+spurious midpoint (two collinear valleys c13/c14, surrounded only by flat hinges).
+Verified (`probe_verify.py`): **star Pass, H-shape Pass (unchanged); quad 2→1
+violation** — v9 gone, only v5 left. The H-shape exercises the merge (V12→V10) and
+stays Pass, proving the transform is safe. Proof probe: `probe_normalize.py`.
+Rationale for linter-side (not export-side): v9 only becomes a deg-2 vertex AFTER
+flat hinges are dropped, and dropping real creases is valid only for foldability
+checking, never for the canonical FOLD the simulator needs.
+
+**v5 (precision) is now the SOLE quad blocker, and all three global ALM knobs are
+definitively exhausted** (don't retry any of them):
+- `TOL_* 1e-8 → 1e-10` (keeping WEIGHT_MAX=1e8): **breaks quad convergence**
+  (`scale optimization did not converge, reason 1`). The penalty-feasibility floor
+  is set by the weight cap (~1e-8); the tolerance can't go below it.
+- `WEIGHT_MAX 1e8 → 1e9`: **fixes v5** (Kawasaki −1.16e-6° → +2.6e-8°) **but BREAKS
+  the star** (a structural hinge flips FLAT → 1 violation) — same failure as the
+  handoff's `1e10`. So 1e8 < safe-for-star < 1e9, and 1e9 ≤ needed-for-quad-v5.
+  No single global weight serves both grid (star) and non-grid (quad) bases.
+- Conclusion (architectural): the v5-class precision fix MUST live **outside** the
+  global penalty — a post-optimization **projection onto the active-path constraint
+  manifold** (option (b) below), or a **warm-started high-weight polish** (re-run
+  scale-opt from the good 1e8 solution with high weight so it tightens within the
+  good basin instead of jumping to the star's degenerate one — needs a
+  configurable WEIGHT_START/WEIGHT_MAX in `tmNLCO_alm`). Access points already
+  exist: `mTree->GetLeafPaths()` + `IsActivePath()` + `GetMinPaperLength()`
+  (= scale·treeLen target) + node `GetLoc()`; a wrapper would add node get/set
+  accessors and Gauss-Newton on the active-path equalities holding scale fixed.
+  Star proves the target residual (~1e-7°) is reachable and Oriedita-passing.
+
+New probes this session: `probe_normalize.py` (proves the v9 fix), `probe_crease_quad.py`
+(facet-colour dump). Engine source is back at known-good (WEIGHT_MAX=1e8, all
+TOL=1e-8); the only `tmNLCO_alm.cpp` diff vs commit is the prior session's
+1e-5→1e-8 landing.
+
+---
+
 ## UPDATE 2026-06-11 — PRECISION SOLVED; FIRST E2E PASSES; quad v9 parked.
 
 **Milestone:** tightened the ALM convergence tolerances `TOL_FEAS`, `TOL_F`

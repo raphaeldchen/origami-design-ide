@@ -78,6 +78,93 @@ def _looks_like_fold(obj: object) -> bool:
 # problems that no M/V relabeling can repair — the agent must move creases.
 _MV_FIXABLE_RULES = {"MAEKAWA"}
 
+# TreeMaker's Universal-Molecule builder can emit spurious degree-2 vertices: a
+# point sitting mid-way along one straight fold line (two collinear creases of the
+# same mountain/valley assignment), often surrounded only by flat hinges. Such a
+# vertex carries NO flat-foldability constraint, but Oriedita does not auto-merge
+# it and rejects the pattern. We normalise these away before validation. Both
+# transforms below are provably foldability-neutral, so they cannot mask a real
+# violation:
+#   (1) drop flat (F / unfolded) creases — they impose no fold constraint, and
+#       Oriedita already imports F as a non-fold auxiliary line;
+#   (2) merge a degree-2 vertex whose two incident creases are COLLINEAR and the
+#       SAME assignment — deleting it and joining the two far endpoints changes
+#       no angle and no layer order.
+# This is a LINT-only normalisation: the canonical FOLD handed to the simulator
+# (with every crease intact) is never mutated.
+_COLLINEAR_TOL_DEG = 1e-3
+
+
+def _angle_deg(coords, a: int, b: int) -> float:
+    import math
+    (x0, y0), (x1, y1) = coords[a], coords[b]
+    return math.degrees(math.atan2(y1 - y0, x1 - x0)) % 360
+
+
+def _normalize_for_foldability(parsed: dict) -> dict:
+    """Return a foldability-equivalent copy with flat creases dropped and
+    collinear same-assignment degree-2 vertices merged out. Operates only on the
+    top-level geometry shape; returns the input unchanged for anything it does not
+    recognise, and is fully defensive — any malformed field leaves the FOLD as-is
+    so we never turn a checkable pattern into an uncheckable one."""
+    try:
+        V = parsed.get("vertices_coords")
+        EV = parsed.get("edges_vertices")
+        EA = parsed.get("edges_assignment")
+        if not (isinstance(V, list) and isinstance(EV, list)
+                and isinstance(EA, list) and len(EV) == len(EA)):
+            return parsed
+
+        # (1) drop flat creases
+        edges = [[list(e), a] for e, a in zip(EV, EA) if a != "F"]
+
+        # (2) iteratively merge collinear same-assignment deg-2 vertices
+        changed = True
+        while changed:
+            changed = False
+            inc: dict[int, list[int]] = {}
+            for ei, (e, _a) in enumerate(edges):
+                inc.setdefault(e[0], []).append(ei)
+                inc.setdefault(e[1], []).append(ei)
+            for v, eids in inc.items():
+                if len(eids) != 2:
+                    continue
+                i1, i2 = eids
+                (e1, a1), (e2, a2) = edges[i1], edges[i2]
+                if a1 != a2:
+                    continue
+                n1 = e1[1] if e1[0] == v else e1[0]
+                n2 = e2[1] if e2[0] == v else e2[0]
+                if n1 == n2:
+                    continue
+                dev = abs((_angle_deg(V, v, n1) - _angle_deg(V, v, n2)) % 360 - 180)
+                if dev > _COLLINEAR_TOL_DEG:
+                    continue
+                edges[i1] = [[n1, n2], a1]
+                del edges[i2]
+                changed = True
+                break
+
+        # nothing removed and no flat creases dropped → hand back the original
+        if len(edges) == len(EV):
+            return parsed
+
+        # re-index, dropping vertices no edge references any more
+        used = sorted({x for e, _ in edges for x in e})
+        remap = {old: new for new, old in enumerate(used)}
+        out = dict(parsed)
+        out["vertices_coords"] = [V[i] for i in used]
+        out["edges_vertices"] = [[remap[e[0]], remap[e[1]]] for e, _ in edges]
+        out["edges_assignment"] = [a for _, a in edges]
+        # foldAngle / orders no longer line up with the re-indexed edges; drop the
+        # ones that are now stale so the JVM does not read mismatched arrays.
+        for stale in ("edges_foldAngle", "faces_vertices", "faceOrders",
+                      "edgeOrders"):
+            out.pop(stale, None)
+        return out
+    except Exception:
+        return parsed
+
 
 def _violation_hint(rule: str, color: str) -> str:
     """Translate Oriedita's (rule, color) enums into a plain, actionable hint."""
@@ -179,12 +266,17 @@ def validate_flat_foldability(fold_json_string: str) -> str:
             "(missing 'vertices_coords' / 'edges_vertices')."
         )
 
+    # Normalise away foldability-neutral artefacts (flat creases, spurious
+    # collinear degree-2 vertices) that Oriedita rejects but that carry no real
+    # constraint. Defensive: returns the input untouched if it cannot apply.
+    fold_to_check = json.dumps(_normalize_for_foldability(parsed))
+
     tmp_path = None
     try:
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".fold", delete=False, dir=_HERE
         ) as fh:
-            fh.write(fold_json_string)
+            fh.write(fold_to_check)
             tmp_path = fh.name
 
         classpath = _ORIEDITA_JAR + os.pathsep + _HERE

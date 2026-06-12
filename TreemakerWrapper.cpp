@@ -18,6 +18,9 @@ of TMWX / TMDEBUG / TMPROFILE defined, so the engine is pure C++.
 #include <pybind11/stl.h>
 
 #include <map>
+#include <vector>
+#include <algorithm>
+#include <utility>
 #include <string>
 #include <sstream>
 #include <fstream>
@@ -30,6 +33,49 @@ of TMWX / TMDEBUG / TMPROFILE defined, so the engine is pure C++.
 #include "tmNLCO_alm.h"   // the freely-distributable optimizer backend (ALM)
 
 namespace py = pybind11;
+
+/*
+ * Solve the dense linear system A*out = rhs (A is n-by-n, row-major) in place by
+ * Gaussian elimination with partial pivoting. Returns false if A is singular to
+ * working precision. n is small here (2 * leaf-count, <= ~16), so an O(n^3) dense
+ * solve is trivial; we use it for the Gauss-Newton normal equations in
+ * ProjectActivePaths.
+ */
+static bool SolveDense(std::vector<double> A, std::vector<double> rhs,
+                       std::size_t n, std::vector<double>& out)
+{
+  out.assign(n, 0.0);
+  for (std::size_t col = 0; col < n; ++col) {
+    // Partial pivot: find the row with the largest magnitude in this column.
+    std::size_t piv = col;
+    double best = std::fabs(A[col * n + col]);
+    for (std::size_t r = col + 1; r < n; ++r) {
+      double v = std::fabs(A[r * n + col]);
+      if (v > best) { best = v; piv = r; }
+    }
+    if (best < 1e-18) return false;            // singular
+    if (piv != col) {
+      for (std::size_t c = 0; c < n; ++c)
+        std::swap(A[piv * n + c], A[col * n + c]);
+      std::swap(rhs[piv], rhs[col]);
+    }
+    // Eliminate below the pivot.
+    double diag = A[col * n + col];
+    for (std::size_t r = col + 1; r < n; ++r) {
+      double f = A[r * n + col] / diag;
+      if (f == 0.0) continue;
+      for (std::size_t c = col; c < n; ++c) A[r * n + c] -= f * A[col * n + c];
+      rhs[r] -= f * rhs[col];
+    }
+  }
+  // Back-substitution.
+  for (std::size_t i = n; i-- > 0;) {
+    double s = rhs[i];
+    for (std::size_t c = i + 1; c < n; ++c) s -= A[i * n + c] * out[c];
+    out[i] = s / A[i * n + i];
+  }
+  return true;
+}
 
 /*
  * Map a TreeMaker crease fold direction onto a FOLD edges_assignment letter.
@@ -115,6 +161,7 @@ public:
 
     mNodeMap.clear();
     mEdgeMap.clear();
+    mSymPairs.clear();
 
     const double w = mTree->GetPaperWidth();
     const double h = mTree->GetPaperHeight();
@@ -207,6 +254,11 @@ public:
     // NODES_SYMMETRIC: enforce the two leaf nodes mirror across the axis.
     mTree->GetOrMakeTwoPartCondition<tmConditionNodesPaired, tmNode>(
         ia->second, ib->second);
+
+    // Remember the pair so the post-optimization active-path projection can
+    // keep them exact mirror images (otherwise it would drift the base
+    // asymmetric while tightening the packing equalities).
+    mSymPairs.emplace_back(ia->second, ib->second);
   }
 
   /*
@@ -471,6 +523,7 @@ public:
     mTree = new tmTree();
     mNodeMap.clear();
     mEdgeMap.clear();
+    mSymPairs.clear();
 
     try {
       mTree->GetSelf(fin);
@@ -502,7 +555,190 @@ public:
     return ExportFold(mTree->GetScale());
   }
 
+public:
+  // Diagnostic: after scale-opt, build the polygon network, measure the largest
+  // active-path length residual, project, and measure it again. Returns a short
+  // "before -> after (nIters, nCons)" line. Proves the precision gain that fixes
+  // the v5-class interior-vertex Kawasaki violation without touching the molecule
+  // build. (Temp; safe to remove once the projection is trusted.)
+  std::string debug_active_path_report() {
+    mTree->BuildTreePolys();
+    if (!mTree->IsPolygonValid())
+      return "polygon network not valid; cannot report active paths\n";
+    double before = MaxActivePathResidual();
+    std::size_t iters = 0, cons = 0;
+    ProjectActivePaths(&iters, &cons);
+    mTree->BuildTreePolys();
+    double after = MaxActivePathResidual();
+    std::ostringstream ss;
+    ss << std::scientific << std::setprecision(3)
+       << "active-path |residual|: " << before << " -> " << after
+       << "  (" << iters << " GN iters, " << cons << " constraints)\n";
+    return ss.str();
+  }
+
 private:
+  // Largest |actPaperLength - minPaperLength| over the active axis-parallel leaf
+  // paths -- the binding circle/river-packing equalities. Requires a current
+  // polygon network (call BuildTreePolys first).
+  double MaxActivePathResidual() {
+    tmArray<tmPath*> paths;
+    mTree->GetLeafPaths(paths);
+    double maxr = 0.0;
+    for (std::size_t k = 0; k < paths.size(); ++k) {
+      tmPath* p = paths[k];
+      if (!(p->IsActivePath() && p->IsAxisParallelPath())) continue;
+      double res = std::fabs(double(p->GetActPaperLength()) -
+                             double(p->GetMinPaperLength()));
+      maxr = std::max(maxr, res);
+    }
+    return maxr;
+  }
+
+  /*
+   * Post-optimization precision polish: project the leaf-node positions onto the
+   * active-path constraint manifold, holding the design scale fixed.
+   *
+   * The ALM scale optimizer converges the binding circle/river-packing equalities
+   * (|loc_a - loc_b| == scale * treeLen) only to its penalty-feasibility floor
+   * (~1e-5..1e-6, set by WEIGHT_MAX). That residual survives into the Universal
+   * Molecule as a ~1e-6 deg Kawasaki error at interior vertices, which Oriedita's
+   * ~1e-6 deg tolerance then rejects (the "v5" quad blocker). Raising the global
+   * penalty fixes the quad but flips a star hinge FLAT -- no single global weight
+   * serves both grid and non-grid bases. So we tighten LOCALLY instead.
+   *
+   * Each active leaf path contributes one equality residual
+   *     r_k = |loc(front_k) - loc(back_k)| - scale*treeLen_k = 0,
+   * whose only free variables are the two leaf endpoints' (x,y) (a branch node on
+   * the path lies on the chord but does not enter its length). We Gauss-Newton on
+   * r holding the active set and scale fixed: d|a-b|/da = (a-b)/|a-b| = u, so the
+   * Jacobian row is +u at a, -u at b. The normal system (J^T J + lambda I) dX =
+   * -J^T r is tiny (2*leafCount unknowns); lambda damps the translation/rotation
+   * gauge null space. A handful of iterations drive the residual to ~1e-13, so the
+   * molecule's interior angles come out exact. This is the irrational-coordinate
+   * analogue of "snap the star to its grid" (which made Oriedita Pass).
+   */
+  void ProjectActivePaths(std::size_t* outIters = nullptr,
+                          std::size_t* outCons = nullptr) {
+    if (outIters) *outIters = 0;
+    if (outCons)  *outCons  = 0;
+
+    // Free variables = leaf-node coordinates.
+    tmArray<tmNode*> leaves;
+    mTree->GetLeafNodes(leaves);
+    const std::size_t L = leaves.size();
+    if (L == 0) return;
+    std::map<tmNode*, std::size_t> idx;
+    for (std::size_t i = 0; i < L; ++i) idx[leaves[i]] = i;
+    std::vector<double> x(L), y(L);
+    for (std::size_t i = 0; i < L; ++i) {
+      x[i] = double(leaves[i]->GetLocX());
+      y[i] = double(leaves[i]->GetLocY());
+    }
+
+    // Active axis-parallel leaf-path equalities. minPaperLength = scale*treeLen
+    // is fixed (scale and tree edges are held), so capture it once.
+    struct Con { std::size_t a, b; double target; };
+    std::vector<Con> cons;
+    tmArray<tmPath*> paths;
+    mTree->GetLeafPaths(paths);
+    for (std::size_t k = 0; k < paths.size(); ++k) {
+      tmPath* p = paths[k];
+      if (!(p->IsActivePath() && p->IsAxisParallelPath())) continue;
+      const tmDpptrArray<tmNode>& pn = p->GetNodes();
+      if (pn.size() < 2) continue;
+      auto ia = idx.find(pn.front());
+      auto ib = idx.find(pn.back());
+      if (ia == idx.end() || ib == idx.end()) continue;   // endpoint not a leaf
+      cons.push_back({ia->second, ib->second,
+                      double(p->GetMinPaperLength())});
+    }
+    if (cons.empty()) return;
+
+    // Symmetry rows: each mirror-paired leaf pair (a,b) about the 45-degree axis
+    // y=x through the paper center (0.5,0.5) must satisfy b=(a.y,a.x), i.e. the
+    // two linear equalities b.x - a.y = 0 and b.y - a.x = 0. Carrying these in
+    // the same least-squares system keeps the base symmetric while the active
+    // paths tighten (free projection would drift it asymmetric).
+    struct SymCon { std::size_t a, b; };
+    std::vector<SymCon> syms;
+    for (const auto& pr : mSymPairs) {
+      auto ia = idx.find(pr.first);
+      auto ib = idx.find(pr.second);
+      if (ia == idx.end() || ib == idx.end()) continue;   // not both leaves
+      syms.push_back({ia->second, ib->second});
+    }
+    if (outCons) *outCons = cons.size() + 2 * syms.size();
+
+    const std::size_t n = 2 * L;
+    const double w = double(mTree->GetPaperWidth());
+    const double h = double(mTree->GetPaperHeight());
+    const double lambda = 1e-9;   // damps the translation/rotation gauge
+    const double tol = 1e-13;
+    const std::size_t maxIters = 50;
+
+    std::size_t it = 0;
+    for (; it < maxIters; ++it) {
+      std::vector<double> A(n * n, 0.0), g(n, 0.0);
+      double maxr = 0.0;
+      for (std::size_t c = 0; c < cons.size(); ++c) {
+        const std::size_t a = cons[c].a, b = cons[c].b;
+        const double dx = x[a] - x[b], dy = y[a] - y[b];
+        const double dist = std::sqrt(dx * dx + dy * dy);
+        if (dist < 1e-15) continue;             // coincident; skip (degenerate)
+        const double res = dist - cons[c].target;
+        maxr = std::max(maxr, std::fabs(res));
+        const double ux = dx / dist, uy = dy / dist;
+        const std::size_t cols[4] = {2 * a, 2 * a + 1, 2 * b, 2 * b + 1};
+        const double Jrow[4] = {ux, uy, -ux, -uy};
+        for (int i = 0; i < 4; ++i) {
+          g[cols[i]] += Jrow[i] * res;          // J^T r
+          for (int j = 0; j < 4; ++j)
+            A[cols[i] * n + cols[j]] += Jrow[i] * Jrow[j];   // J^T J
+        }
+      }
+      // Symmetry equalities (linear; two rows per pair). Row 1: x[b]-y[a]=0
+      // (cols 2b:+1, 2a+1:-1). Row 2: y[b]-x[a]=0 (cols 2b+1:+1, 2a:-1).
+      for (std::size_t s = 0; s < syms.size(); ++s) {
+        const std::size_t a = syms[s].a, b = syms[s].b;
+        const std::size_t row1[2] = {2 * b, 2 * a + 1};
+        const double      c1[2]   = {1.0, -1.0};
+        const double      r1      = x[b] - y[a];
+        const std::size_t row2[2] = {2 * b + 1, 2 * a};
+        const double      c2[2]   = {1.0, -1.0};
+        const double      r2      = y[b] - x[a];
+        maxr = std::max(maxr, std::max(std::fabs(r1), std::fabs(r2)));
+        for (int i = 0; i < 2; ++i) {
+          g[row1[i]] += c1[i] * r1;
+          g[row2[i]] += c2[i] * r2;
+          for (int j = 0; j < 2; ++j) {
+            A[row1[i] * n + row1[j]] += c1[i] * c1[j];
+            A[row2[i] * n + row2[j]] += c2[i] * c2[j];
+          }
+        }
+      }
+      if (maxr < tol) break;
+      for (std::size_t d = 0; d < n; ++d) A[d * n + d] += lambda;
+      // Solve (J^T J + lambda I) dX = -J^T r.
+      for (std::size_t d = 0; d < n; ++d) g[d] = -g[d];
+      std::vector<double> dX;
+      if (!SolveDense(A, g, n, dX)) break;       // singular; keep best so far
+      for (std::size_t i = 0; i < L; ++i) {
+        x[i] += dX[2 * i];
+        y[i] += dX[2 * i + 1];
+        if (x[i] < 0.0) x[i] = 0.0; if (x[i] > w) x[i] = w;   // stay on paper
+        if (y[i] < 0.0) y[i] = 0.0; if (y[i] > h) y[i] = h;
+      }
+    }
+    if (outIters) *outIters = it;
+
+    // Write refined coordinates back. One outer cleaner so the (deferred)
+    // CleanupAfterEdit recomputes path lengths / active flags / polys once.
+    tmTreeCleaner tc(mTree);
+    for (std::size_t i = 0; i < L; ++i)
+      leaves[i]->SetLoc(tmPoint(x[i], y[i]));
+  }
+
   // Build the polygon network + Universal Molecule from the current base (at the
   // given scale) and return the FOLD string. Shared by the scale-only and
   // strain paths. Steps mirror the GUI's Build Crease Pattern.
@@ -520,6 +756,22 @@ private:
          << "partition, so the Universal Molecule cannot be built. The base is "
          << "not at a complete uniaxial optimum -- it likely needs additional "
          << "active-path/angle conditions or a different proportion/symmetry.";
+      throw std::runtime_error(ss.str());
+    }
+
+    // ---- Precision polish: project leaf coords onto the active-path manifold ----
+    // Tightens the binding equalities from the ALM penalty floor (~1e-6) to
+    // ~1e-13 so interior-vertex Kawasaki angles come out exact. Holds scale and
+    // the active set fixed, so it does not change discrete topology; the move is
+    // ~1e-5, well inside the active basin. SetLoc scheduled a CleanupAfterEdit;
+    // rebuild polys on the refined coords before the molecule build.
+    ProjectActivePaths();
+    mTree->BuildTreePolys();
+    if (!mTree->IsPolygonValid()) {
+      std::ostringstream ss;
+      ss << "polygon network became invalid after active-path projection "
+         << "(scale=" << scale << "); this should not happen for a converged "
+         << "base -- report it.";
       throw std::runtime_error(ss.str());
     }
 
@@ -606,6 +858,7 @@ private:
   tmTree* mTree;
   std::map<int, tmNode*> mNodeMap;   // JSON node id -> tmNode*
   std::map<int, tmEdge*> mEdgeMap;   // child node id -> its parent tmEdge*
+  std::vector<std::pair<tmNode*, tmNode*>> mSymPairs;  // mirror-paired leaf nodes
 };
 
 PYBIND11_MODULE(headless_treemaker, m) {
@@ -635,6 +888,8 @@ PYBIND11_MODULE(headless_treemaker, m) {
            &HeadlessTreemaker::debug_vertex_report)
       .def("debug_crease_report",
            &HeadlessTreemaker::debug_crease_report)
+      .def("debug_active_path_report",
+           &HeadlessTreemaker::debug_active_path_report)
       .def("run_strain_optimization_and_export",
            &HeadlessTreemaker::run_strain_optimization_and_export)
       .def("load_and_export_tmd", &HeadlessTreemaker::load_and_export_tmd,
