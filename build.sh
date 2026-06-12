@@ -10,7 +10,10 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-TM_SRC="${HERE}/../treemaker/Source"
+# Vendored TreeMaker engine source (the minimal buildable subset: Source/tmModel
+# plus the loose Source headers and tmHeader/tmPrec). Self-contained so the repo
+# rebuilds from a fresh clone without the external vishvish/treemaker checkout.
+TM_SRC="${HERE}/treemaker/Source"
 TM_MODEL="${TM_SRC}/tmModel"
 
 # Interpreter to build against (override with PYTHON=/path/to/python ./build.sh).
