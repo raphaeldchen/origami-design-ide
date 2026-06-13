@@ -1,5 +1,0 @@
----
-triple:          'arm64-apple-darwin'
-binary-path:     '/Users/raphaelchen/Desktop/AI-Driven-Origami-IDE/mcp_harness/headless_treemaker.cpython-314-darwin.so'
-relocations:     []
-...

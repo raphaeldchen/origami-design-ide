@@ -1,0 +1,20 @@
+{
+  "cat-long-legs": "PASS",
+  "cat-short-legs": "PASS",
+  "cat-spine2": "PASS",
+  "cat-spine3": "PASS",
+  "cat-spine4": "FAIL-LINT",
+  "cat-spine5": "CLEAN-ERR",
+  "deep-chain": "CLEAN-ERR",
+  "hshape": "PASS",
+  "quad": "PASS",
+  "star-3": "PASS",
+  "star-4": "PASS",
+  "star-4-sym": "PASS",
+  "star-5": "FAIL-LINT",
+  "star-6": "FAIL-LINT",
+  "star-6-sym": "FAIL-LINT",
+  "star-8": "FAIL-LINT",
+  "two-level-tree": "PASS",
+  "uneven-star": "PASS"
+}
